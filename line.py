@@ -1,7 +1,13 @@
 from datetime import datetime, timedelta
-from socket import error as socket_error, timeout as socket_timeout, create_connection
 from errno import EAGAIN
 from threading import Lock
+
+def total_seconds(delta):
+    assert(isinstance(delta, timedelta))
+    try:
+        return delta.total_seconds()
+    except AttributeError:
+        return delta.microseconds / 1000000. + delta.seconds + delta.days * 3600*24
 
 class Timeout(RuntimeError):
     pass
@@ -47,31 +53,19 @@ class PersistentSocket(object):
     def sendall(self, data):
         
         return self.__socket__.sendall(data)
-        
+
 class Line(object):
-    def __init__(self, socket):
-        self.__socket__ = socket
+    """Abstract RS485 line"""
+    def __init__(self):
         self.__buffer__ = bytearray()
         self.lock = Lock()
+    def write(self, data):
+        raise NotImplemented
+
     def readWithTimeout(self, timeout):
-        """Reads socket into buffer until at least one byte is read or timeout is expired."""
+        """Reads into buffer until at least one byte is read or timeout is expired."""
         assert(isinstance(timeout, timedelta))
-        socket = self.__socket__
-        try:
-            socket.settimeout(timeout.total_seconds())
-            data = socket.recv(4092)
-            if len(data):
-                self.__buffer__ += data
-                return
-            #print("Waiting")
-            self.__buffer__ += socket.recv(1)
-        except socket_timeout as e:
-            return
-        except socket_error as e:
-            if e.errno == EAGAIN:
-                return
-            raise       
-                    
+        raise NotImplemented
     def readline(self, timeout, delimiter=b'\r'):
         assert(isinstance(timeout, timedelta))
         def tryReadLine(timeout):
@@ -91,14 +85,60 @@ class Line(object):
         if not line:
             raise Timeout("Line read timeout. Data read so far: " + str(self.__buffer__))
         return line
-    
+
+class SerialLine(Line):
+    """Makes use of RS232 to RS485 converters"""
+    from serial import Serial, SerialTimeoutException
+    def __init__(self, serial):
+        assert(isinstance(serial, SerialLine.Serial))
+        Line.__init__(self)
+        self.__serial__ = serial
+    def write(self, data):
+        self.__serial__.write(data)
+    def readWithTimeout(self, timeout):
+        assert(isinstance(timeout, timedelta))
+        if (self.__serial__.inWaiting() > 0):
+            self.__buffer__ += self.__serial__.read(self.__serial__.inWaiting())
+            return
+        self.__serial__.timeout = total_seconds(timeout)
+        try:
+            self.__buffer__ += self.__serial__.read(1)
+        except SerialLine.SerialTimeoutException:
+            pass
+
+
+class SocketLine(Line):
+    """Makes use of TCP/IP to RS485 converters"""
+    from socket import error as socket_error, timeout as socket_timeout, create_connection
+    def __init__(self, socket):
+        Line.__init__(self)
+        self.__socket__ = socket
+    def readWithTimeout(self, timeout):
+        """Reads socket into buffer until at least one byte is read or timeout is expired."""
+        assert(isinstance(timeout, timedelta))
+        socket = self.__socket__
+        try:
+            socket.settimeout(total_seconds(timeout))
+            data = socket.recv(4092)
+            if len(data):
+                self.__buffer__ += data
+                return
+            #print("Waiting")
+            self.__buffer__ += socket.recv(1)
+        except socket_timeout as e:
+            return
+        except socket_error as e:
+            if e.errno == EAGAIN:
+                return
+            raise       
+                        
     def write(self, data):
         socket = self.__socket__
         oldtimeout = socket.gettimeout()
         try:
             self.__socket__.sendall(data)
         finally:
-            socket.settimeout(oldtimeout)    
+            socket.settimeout(oldtimeout)
 
 
 class DebugLine(object):
@@ -106,9 +146,6 @@ class DebugLine(object):
         self.__line__ = line
         self.prefix = prefix
         self.lock = Lock()
-    def setTimeout(self, timeout):
-        self.__line__.tiemout = timeout
-    timeout = property(lambda self: self.__line__.timeout, setTimeout)
     def write(self, data):
         print(self.prefix,"sending ",tohex(data))
         self.__line__.write(data)

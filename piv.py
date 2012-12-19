@@ -2,7 +2,7 @@ from time import sleep
 from struct import pack, unpack
 from datetime import timedelta
 import unittest 
-from line import Line
+from .line import Line
 
 class PivError(RuntimeError):
     pass
